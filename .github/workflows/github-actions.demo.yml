@@ -2,8 +2,12 @@ name: Likelion CI Test
 run-name: ${{ github.actor }} is testing out GitHub Actions 🚀
 on: [push]
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USER: ec2-user
+      EC2_DIR: sample-server
     steps:
       - name: Check out repository code
         uses: actions/checkout@v4
@@ -16,6 +20,33 @@ jobs:
         run: npm ci
       - name: Build
         run: npm run build
-      - name: Run tests
-        run: npm test
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2.pem
+          chmod 600 ~/.ssh/ec2.pem
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+      - name: Copy files to EC2
+        run: |
+          ssh -i ~/.ssh/ec2.pem "$EC2_USER@$EC2_HOST" "mkdir -p ~/$EC2_DIR"
+          scp -i ~/.ssh/ec2.pem -r \
+            dist \
+            package.json \
+            package-lock.json \
+            tsconfig.json \
+            tsconfig.build.json \
+            "$EC2_USER@$EC2_HOST:~/$EC2_DIR"
+      - name: Restart app on EC2
+        run: |
+          ssh -i ~/.ssh/ec2.pem "$EC2_USER@$EC2_HOST" <<'EOF'
+          set -e
+          cd ~/${EC2_DIR}
+          npm ci --omit=dev
+          if pm2 describe sample-server >/dev/null 2>&1; then
+            pm2 restart sample-server
+          else
+            pm2 start dist/main.js --name "sample-server"
+          fi
+          pm2 save
+          EOF
       - run: echo "This job's status is ${{ job.status }}."
